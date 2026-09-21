@@ -1,0 +1,74 @@
+{
+    "author": "vinay1017@gmail.com",
+    "dependencies": {},
+    "keywords": [],
+    "name": "digivice",
+    "pebble": {
+        "displayName": "Digivice",
+        "enableMultiJS": true,
+        "messageKeys": [],
+        "projectType": "native",
+        "resources": {
+            "media": [
+                {
+                    "file": "images/agu.png",
+                    "name": "AGUMON",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/bota.png",
+                    "name": "BOTAMON",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/koro.png",
+                    "name": "KOROMON",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/grey.png",
+                    "name": "GREYMON",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/metalgrey_vi.png",
+                    "name": "METALGREYMON",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/IconAgu",
+                    "menuIcon": true,
+                    "name": "ICON_AGU",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/digisquare3.png",
+                    "name": "DIGIVICE_BORDER",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/digiviceSmallRound.png",
+                    "name": "DIGIVICE_ROUND_BORDER",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                }
+            ]
+        },
+        "sdkVersion": "3",
+        "targetPlatforms": [
+            "emery"
+        ],
+        "uuid": "2de50785-efaa-4413-a6eb-eb6e9336e463",
+        "watchapp": {
+            "watchface": false
+        }
+    },
+    "version": "0.1.0"
+}
