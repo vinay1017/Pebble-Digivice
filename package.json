@@ -1,12 +1,21 @@
 {
     "author": "vinay1017@gmail.com",
-    "dependencies": {},
+    "dependencies": {
+        "@rebble/clay": "^1.1.0"
+    },
     "keywords": [],
     "name": "digivice",
     "pebble": {
+        "capabilities": [
+            "configurable",
+            "health"
+        ],
         "displayName": "Digivice",
         "enableMultiJS": true,
-        "messageKeys": [],
+        "messageKeys": [
+            "ResetDigimon",
+            "BatterySaver"
+        ],
         "projectType": "native",
         "resources": {
             "media": [
@@ -56,19 +65,22 @@
                 {
                     "file": "images/digiviceSmallRound.png",
                     "name": "DIGIVICE_ROUND_BORDER",
-                    "targetPlatforms": null,
+                    "targetPlatforms": [
+                        "gabbro"
+                    ],
                     "type": "bitmap"
                 }
             ]
         },
         "sdkVersion": "3",
         "targetPlatforms": [
-            "emery"
+            "emery",
+            "gabbro"
         ],
         "uuid": "2de50785-efaa-4413-a6eb-eb6e9336e463",
         "watchapp": {
             "watchface": false
         }
     },
-    "version": "0.1.0"
+    "version": "0.3.0"
 }

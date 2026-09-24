@@ -14,6 +14,16 @@
 #define ATTENTION_HUNGER_THRESHOLD 70
 #define ATTENTION_ENERGY_THRESHOLD 25
 
+// Care Mistakes redesign: a mistake only happens if the main screen is
+// open, a problem (needs_attention()) is visibly showing, AND it's still
+// unresolved after this much real time with the app actually open -
+// simply closing the app doesn't count, only genuinely ignoring a visible
+// issue while looking at it does. Since hunger/energy/mess can only ever
+// change via the launch-time decay pass or your own button presses (never
+// while the app just sits open), the grace period only ever needs to
+// start/stop at those two moments - see check_mistake_grace().
+#define CARE_MISTAKE_GRACE_MS (90 * 1000)
+
 #define STAGE_HOURS_BOTAMON 1
 #define STAGE_HOURS_KOROMON 23
 #define STAGE_HOURS_AGUMON 48
@@ -85,6 +95,15 @@
 #define SQUARE_TOP 54
 #define SQUARE_BOTTOM 174
 
+// Estimated cutout coordinates for the round border (digiviceSmallRound.png,
+// Gabbro-only, 260x260). Read by eye from a screenshot proportionally, NOT
+// measured exact pixels like the Emery square above - expect this to need
+// another real adjustment pass once you see it rendered.
+#define GABBRO_SQUARE_LEFT 68
+#define GABBRO_SQUARE_RIGHT 196
+#define GABBRO_SQUARE_TOP 55
+#define GABBRO_SQUARE_BOTTOM 183
+
 // Fixed-height band reserved at the bottom of the content area for
 // progress label + bar + stats + action text.
 #define BOTTOM_UI_HEIGHT 56
@@ -97,8 +116,7 @@
 // factor instead - which is the point, since your own Vital Points
 // (earned from steps) become bonus HP your opponent doesn't get.
 #define BATTLE_DAMAGE_PER_HIT 25
-#define BATTLE_LOSS_VP_PENALTY 20   // the "stake" of the gamble - lost VP on a loss
-#define BATTLE_WIN_VP_REWARD 15     // slightly less than the loss penalty, so battling isn't a guaranteed-profit loop
+#define BATTLE_VP_STAKE 15          // gained on a win, lost on a loss - symmetric, since the HP bonus is now capped and fair
 // Each round now plays out in two visible phases: a projectile travels
 // from attacker to defender (PROJECTILE_STEPS sub-frames), then on impact
 // the defender flickers (FLICKER_STEPS sub-frames) before a brief pause
@@ -138,6 +156,8 @@ typedef struct {
   int vital_points;      // separate resource, gained from steps only
   int win_count;          // per-stage battle wins - resets on evolution, groundwork for future branching evolution gates
   int loss_count;         // per-stage battle losses
+  int last_steps_shortfall;  // how far short of the steps requirement you were at your LAST evolution, if any - groundwork for future branching
+  int last_effort_shortfall; // same, for the Effort requirement
 } PetState;
 
 static Window *s_window;
@@ -148,13 +168,16 @@ static Layer *s_battle_canvas_layer;
 static Layer *s_stats_canvas_layer;
 static PetState s_pet;
 static GBitmap *s_pet_bitmap = NULL;
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_GABBRO)
 static GBitmap *s_border_bitmap = NULL;
 #endif
 static AppTimer *s_idle_timer = NULL;
 static bool s_idle_bob_up = false;
+static bool s_battery_saver = false; // when true, idle bob is fully disabled
 static bool s_evolving = false;
 static AppTimer *s_evolve_timer = NULL;
+static AppTimer *s_mistake_grace_timer = NULL;
+static bool s_mistake_grace_active = false; // true once a grace period has started for the CURRENT unresolved issue
 
 // Battle screen state - transient, not persisted (just "what to show right now")
 typedef enum { BATTLE_IDLE, BATTLE_FIGHTING, BATTLE_RESULT } BattleScreenState;
@@ -199,7 +222,10 @@ enum {
   KEY_MANUALLY_ASLEEP,
   KEY_VITAL_POINTS,
   KEY_WIN_COUNT,
-  KEY_LOSS_COUNT
+  KEY_LOSS_COUNT,
+  KEY_LAST_STEPS_SHORTFALL,
+  KEY_LAST_EFFORT_SHORTFALL,
+  KEY_BATTERY_SAVER
 };
 
 static bool is_night_hour(int hour) {
@@ -226,6 +252,8 @@ static void save_pet(void) {
   persist_write_int(KEY_VITAL_POINTS, s_pet.vital_points);
   persist_write_int(KEY_WIN_COUNT, s_pet.win_count);
   persist_write_int(KEY_LOSS_COUNT, s_pet.loss_count);
+  persist_write_int(KEY_LAST_STEPS_SHORTFALL, s_pet.last_steps_shortfall);
+  persist_write_int(KEY_LAST_EFFORT_SHORTFALL, s_pet.last_effort_shortfall);
 }
 
 static void load_pet(void) {
@@ -249,6 +277,8 @@ static void load_pet(void) {
     s_pet.vital_points = persist_exists(KEY_VITAL_POINTS) ? persist_read_int(KEY_VITAL_POINTS) : 0;
     s_pet.win_count = persist_exists(KEY_WIN_COUNT) ? persist_read_int(KEY_WIN_COUNT) : 0;
     s_pet.loss_count = persist_exists(KEY_LOSS_COUNT) ? persist_read_int(KEY_LOSS_COUNT) : 0;
+    s_pet.last_steps_shortfall = persist_exists(KEY_LAST_STEPS_SHORTFALL) ? persist_read_int(KEY_LAST_STEPS_SHORTFALL) : 0;
+    s_pet.last_effort_shortfall = persist_exists(KEY_LAST_EFFORT_SHORTFALL) ? persist_read_int(KEY_LAST_EFFORT_SHORTFALL) : 0;
   } else {
     s_pet.hunger = 20;
     s_pet.energy = 90;
@@ -269,6 +299,8 @@ static void load_pet(void) {
     s_pet.vital_points = 0;
     s_pet.win_count = 0;
     s_pet.loss_count = 0;
+    s_pet.last_steps_shortfall = 0;
+    s_pet.last_effort_shortfall = 0;
   }
 }
 
@@ -355,7 +387,7 @@ static void check_evolution(void) {
                       (s_pet.steps_in_stage / STEPS_PER_EFFORT_HEART);
   bool effort_met = (effort_needed >= 0) && (total_effort >= effort_needed);
 
-  bool care_ok = s_pet.care_mistakes <= CARE_MISTAKES_CAP;
+  bool care_ok = s_pet.care_mistakes <= CARE_MISTAKES_CAP; // now backed by a fair, "you saw it and ignored it" trigger - see check_mistake_grace()
 
   bool normal_path = hours_met && effort_met && care_ok;
 
@@ -365,6 +397,15 @@ static void check_evolution(void) {
       (s_pet.steps_in_stage >= steps_needed * SUPER_ACTIVE_STEPS_MULTIPLIER);
 
   if (normal_path || super_active_path) {
+    // Snapshot how this stage actually went, BEFORE the reset below wipes
+    // the numbers it's based on - groundwork for future branching
+    // evolutions (alongside win_count/loss_count, which already serve the
+    // same purpose for battle performance).
+    s_pet.last_steps_shortfall = (steps_needed >= 0 && s_pet.steps_in_stage < steps_needed) ?
+        (steps_needed - s_pet.steps_in_stage) : 0;
+    s_pet.last_effort_shortfall = (effort_needed >= 0 && total_effort < effort_needed) ?
+        (effort_needed - total_effort) : 0;
+
     s_pet.stage = next_stage(s_pet.stage);
     s_pet.hours_in_stage = 0;
     s_pet.steps_in_stage = 0;
@@ -372,13 +413,37 @@ static void check_evolution(void) {
     s_pet.care_mistakes = 0; // resets each evolution, matching the real device
     s_pet.win_count = 0;
     s_pet.loss_count = 0;
+    s_pet.vital_points = 0; // fresh form, fresh start - rebuild via steps again
     load_pet_bitmap();
 
     s_evolving = true;
-    vibes_short_pulse();
+    vibes_double_pulse(); // more distinct than the everyday action buzz - this moment should feel bigger
     if (s_evolve_timer) app_timer_cancel(s_evolve_timer);
     s_evolve_timer = app_timer_register(EVOLVE_DURATION_MS, evolve_timer_callback, NULL);
   }
+}
+
+// True when hours-in-stage AND Effort are BOTH already met, but Care
+// Mistakes are the ONLY thing still blocking normal evolution. Only one
+// evolution line exists right now, so hitting the mistake cap can leave
+// you stuck here for a long time with no explanation why - this exists so
+// we can at least show something clear instead of the player wondering
+// why nothing's happening. Once branching evolutions exist, this
+// situation should route to a lesser alternate form instead of blocking
+// outright.
+static bool evolution_blocked_by_mistakes(void) {
+  if (!s_pet.alive || s_pet.stage == STAGE_METALGREYMON) return false;
+
+  int hours_needed = hours_required_for_current_stage();
+  int effort_needed = effort_required_for_current_stage();
+
+  bool hours_met = (hours_needed >= 0) && (s_pet.hours_in_stage >= hours_needed);
+  int total_effort = (s_pet.training_count / TRAINS_PER_EFFORT_HEART) +
+                      (s_pet.steps_in_stage / STEPS_PER_EFFORT_HEART);
+  bool effort_met = (effort_needed >= 0) && (total_effort >= effort_needed);
+  bool care_ok = s_pet.care_mistakes <= CARE_MISTAKES_CAP;
+
+  return hours_met && effort_met && !care_ok;
 }
 
 static int steps_since_last_check(time_t last_check, time_t now) {
@@ -435,8 +500,12 @@ static void apply_time_decay(void) {
   if (!frozen) {
     time_t cursor = s_pet.last_check;
     int awake_hours = 0; // evolution timer only counts AWAKE hours - it pauses during any sleep, matching the real device
-    bool was_hunger_critical = (s_pet.hunger >= ATTENTION_HUNGER_THRESHOLD);
-    bool was_energy_critical = (s_pet.energy <= ATTENTION_ENERGY_THRESHOLD);
+    // was_hunger_critical/was_energy_critical (and the whole edge-detected
+    // increment block below) are commented out entirely, alongside the
+    // Care Mistakes feature itself - leaving them declared but with their
+    // reads removed was what actually broke the build (GCC flags a
+    // variable that's assigned but never read as its own fatal error,
+    // separate from a plain "unused variable").
 
     for (int i = 0; i < hours_elapsed; i++) {
       cursor += 3600;
@@ -454,18 +523,18 @@ static void apply_time_decay(void) {
       if (s_pet.energy < 0) s_pet.energy = 0;
       if (s_pet.energy > MAX_STAT) s_pet.energy = MAX_STAT;
 
-      // Care mistake: a real mistake is an unanswered "call" - hunger/energy
-      // crossing INTO the critical zone and not being addressed, not simply
-      // interacting at the wrong time (waking the pet was never a mistake
-      // on the real device - only ignoring an actual need was). Edge-
-      // triggered so a mistake only counts once per neglect episode, not
-      // once per hour it stays critical.
-      bool hunger_critical_now = (s_pet.hunger >= ATTENTION_HUNGER_THRESHOLD);
-      bool energy_critical_now = (s_pet.energy <= ATTENTION_ENERGY_THRESHOLD);
-      if (hunger_critical_now && !was_hunger_critical) s_pet.care_mistakes++;
-      if (energy_critical_now && !was_energy_critical) s_pet.care_mistakes++;
-      was_hunger_critical = hunger_critical_now;
-      was_energy_critical = energy_critical_now;
+      // Care mistake tracking is DISABLED for now, not removed - it
+      // increments silently in the background, with no way for the player
+      // to know until they happen to open the app, which felt unfair.
+      // Re-enable once the background worker (real-time vibration alerts)
+      // exists to actually warn about this as it happens, matching how
+      // the real device works.
+      // bool hunger_critical_now = (s_pet.hunger >= ATTENTION_HUNGER_THRESHOLD);
+      // bool energy_critical_now = (s_pet.energy <= ATTENTION_ENERGY_THRESHOLD);
+      // if (hunger_critical_now && !was_hunger_critical) s_pet.care_mistakes++;
+      // if (energy_critical_now && !was_energy_critical) s_pet.care_mistakes++;
+      // was_hunger_critical = hunger_critical_now;
+      // was_energy_critical = energy_critical_now;
     }
 
     s_pet.age_hours += hours_elapsed;   // lifetime stat - counts every hour, asleep or not
@@ -474,7 +543,7 @@ static void apply_time_decay(void) {
     s_pet.hours_since_clean += hours_elapsed;
     if (!s_pet.has_mess && s_pet.hours_since_clean >= MESS_HOURS_THRESHOLD) {
       s_pet.has_mess = true;
-      s_pet.care_mistakes++;
+      // s_pet.care_mistakes++; // disabled alongside the above - same silent-penalty problem
     }
 
     if (s_pet.hunger >= MAX_STAT) {
@@ -496,6 +565,9 @@ static void apply_time_decay(void) {
 static GRect content_rect(GRect bounds) {
 #if defined(PBL_PLATFORM_EMERY)
   return GRect(SQUARE_LEFT, SQUARE_TOP, SQUARE_RIGHT - SQUARE_LEFT, SQUARE_BOTTOM - SQUARE_TOP);
+#elif defined(PBL_PLATFORM_GABBRO)
+  return GRect(GABBRO_SQUARE_LEFT, GABBRO_SQUARE_TOP,
+      GABBRO_SQUARE_RIGHT - GABBRO_SQUARE_LEFT, GABBRO_SQUARE_BOTTOM - GABBRO_SQUARE_TOP);
 #else
   return GRect(BEZEL_SIDE, BEZEL_TOP, bounds.size.w - 2 * BEZEL_SIDE, bounds.size.h - BEZEL_TOP - BEZEL_BOTTOM);
 #endif
@@ -551,10 +623,65 @@ static void draw_sleep_indicator(GContext *ctx, GRect bounds) {
       GRect(pos.x - 20, pos.y - 10, 40, 20), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 }
 
+// Shown above the pet's head, on the LEFT side (mirroring the sleep
+// indicator's right-side offset, so they can never collide), whenever
+// evolution_blocked_by_mistakes() is true - a clear "this is why nothing
+// is happening" signal instead of silent confusion.
+static void draw_evo_failed_indicator(GContext *ctx, GRect bounds) {
+  if (!evolution_blocked_by_mistakes()) return;
+
+  GPoint pet_center = pet_center_point(bounds);
+  GRect cr = content_rect(bounds);
+  int sprite_half_h = 15;
+  if (s_pet_bitmap) {
+    sprite_half_h = gbitmap_get_bounds(s_pet_bitmap).size.h / 2;
+  }
+  GPoint pos = GPoint(pet_center.x - 20, pet_center.y - sprite_half_h - 10);
+
+  int min_y = cr.origin.y + TOP_UI_HEIGHT + 6;
+  if (pos.y < min_y) pos.y = min_y;
+
+  graphics_context_set_text_color(ctx, GColorRed);
+  graphics_draw_text(ctx, "EVO FAIL", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+      GRect(pos.x - 30, pos.y - 8, 60, 16), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+}
+
 static bool needs_attention(void) {
   return s_pet.alive && (s_pet.hunger >= ATTENTION_HUNGER_THRESHOLD ||
                           s_pet.energy <= ATTENTION_ENERGY_THRESHOLD ||
                           s_pet.has_mess);
+}
+
+// Fires once the grace period has fully elapsed with the app still open.
+// If the issue is STILL unresolved at that point, that's the actual
+// mistake - genuinely ignored, not just "didn't open the app fast enough."
+static void mistake_grace_timeout(void *data) {
+  s_mistake_grace_timer = NULL;
+  if (needs_attention()) {
+    s_pet.care_mistakes++;
+    save_pet();
+  }
+  s_mistake_grace_active = false; // this episode is resolved either way - a fresh one can start later if it happens again
+}
+
+// Call this any time the underlying condition could have changed: once
+// right when the main screen loads (catching "already had a problem when
+// I opened it" and starting their grace period fairly, from scratch), and
+// again after any action that might have fixed it. Nothing else can
+// change hunger/energy/mess while the app just sits open, so those two
+// call sites are the only ones needed.
+static void check_mistake_grace(void) {
+  if (needs_attention()) {
+    if (!s_mistake_grace_active) {
+      s_mistake_grace_active = true;
+      if (s_mistake_grace_timer) app_timer_cancel(s_mistake_grace_timer);
+      s_mistake_grace_timer = app_timer_register(CARE_MISTAKE_GRACE_MS, mistake_grace_timeout, NULL);
+    }
+  } else if (s_mistake_grace_timer) {
+    app_timer_cancel(s_mistake_grace_timer);
+    s_mistake_grace_timer = NULL;
+    s_mistake_grace_active = false;
+  }
 }
 
 static void draw_procedural_bezel(GContext *ctx, GRect bounds) {
@@ -578,7 +705,7 @@ static void draw_procedural_bezel(GContext *ctx, GRect bounds) {
 }
 
 static void draw_background(GContext *ctx, GRect bounds) {
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_GABBRO)
   if (s_border_bitmap) {
     graphics_context_set_compositing_mode(ctx, GCompOpSet);
     graphics_draw_bitmap_in_rect(ctx, s_border_bitmap, bounds);
@@ -694,6 +821,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   draw_mess(ctx, bounds);
   draw_attention_icon(ctx, bounds);
   draw_sleep_indicator(ctx, bounds);
+  draw_evo_failed_indicator(ctx, bounds);
 
   graphics_context_set_text_color(ctx, GColorBlack);
 
@@ -775,12 +903,13 @@ static void finish_battle(bool won) {
     // side of the same stake a loss costs you.
     s_pet.training_count += TRAINS_PER_EFFORT_HEART;
     s_pet.win_count++;
-    s_pet.vital_points += BATTLE_WIN_VP_REWARD;
+    s_pet.vital_points += BATTLE_VP_STAKE;
     if (s_pet.vital_points > MAX_VITAL_POINTS) s_pet.vital_points = MAX_VITAL_POINTS;
   } else {
-    // The stake of the gamble: losing costs Vital Points, the exact
-    // resource battling is built around.
-    s_pet.vital_points -= BATTLE_LOSS_VP_PENALTY;
+    // The stake of the gamble: losing costs the exact same amount a win
+    // gains - a genuinely even trade now that the HP bonus itself is
+    // capped and fair, not compensating for an overpowered advantage.
+    s_pet.vital_points -= BATTLE_VP_STAKE;
     if (s_pet.vital_points < 0) s_pet.vital_points = 0;
     s_pet.loss_count++;
   }
@@ -865,8 +994,12 @@ static void battle_anim_tick(void *data) {
 // Only the player gets a Vital Points bonus (opponent is a same-tier
 // "wild" stand-in with just the tier's base HP) - that asymmetry is the
 // whole point, since it's what makes your own steps matter to the outcome.
+// Bonus is capped at a flat +50 HP (2 extra hit-absorptions at
+// BATTLE_DAMAGE_PER_HIT=25), not scaled per-tier - at 0 VP it's a fair
+// fight, at max 100 VP you can afford roughly 2 extra losses in the coin
+// flip and still win, not dozens.
 static void start_battle(void) {
-  s_battle_player_max_hp = base_hp_for_stage(s_pet.stage) + s_pet.vital_points * 10;
+  s_battle_player_max_hp = base_hp_for_stage(s_pet.stage) + s_pet.vital_points / 2;
   s_battle_opponent_max_hp = base_hp_for_stage(s_pet.stage);
   s_battle_player_hp = s_battle_player_max_hp;
   s_battle_opponent_hp = s_battle_opponent_max_hp;
@@ -984,9 +1117,9 @@ static void battle_canvas_update_proc(Layer *layer, GContext *ctx) {
 
     static char outcome_buf[48];
     if (s_last_battle_won) {
-      snprintf(outcome_buf, sizeof(outcome_buf), "+%d Vital Points", BATTLE_WIN_VP_REWARD);
+      snprintf(outcome_buf, sizeof(outcome_buf), "+%d Vital Points", BATTLE_VP_STAKE);
     } else {
-      snprintf(outcome_buf, sizeof(outcome_buf), "-%d Vital Points", BATTLE_LOSS_VP_PENALTY);
+      snprintf(outcome_buf, sizeof(outcome_buf), "-%d Vital Points", BATTLE_VP_STAKE);
     }
     graphics_draw_text(ctx, outcome_buf, fonts_get_system_font(FONT_KEY_GOTHIC_18),
         GRect(cr.origin.x, cr.origin.y + cr.size.h / 2 - 20, cr.size.w, 20),
@@ -1028,21 +1161,31 @@ static void battle_canvas_update_proc(Layer *layer, GContext *ctx) {
       GRect(cr.origin.x, cr.origin.y + cr.size.h / 2 + 6, cr.size.w, 16),
       GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 
-  graphics_draw_text(ctx, "SELECT: Battle", fonts_get_system_font(FONT_KEY_GOTHIC_14),
-      GRect(cr.origin.x, cr.origin.y + cr.size.h / 2 + 24, cr.size.w, 16),
-      GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+  if (s_pet.vital_points > 0) {
+    graphics_draw_text(ctx, "SELECT: Battle", fonts_get_system_font(FONT_KEY_GOTHIC_14),
+        GRect(cr.origin.x, cr.origin.y + cr.size.h / 2 + 24, cr.size.w, 16),
+        GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+  } else {
+    graphics_draw_text(ctx, "Need VP - walk more!", fonts_get_system_font(FONT_KEY_GOTHIC_14),
+        GRect(cr.origin.x, cr.origin.y + cr.size.h / 2 + 24, cr.size.w, 16),
+        GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+  }
 
   graphics_draw_text(ctx, "< Back", fonts_get_system_font(FONT_KEY_GOTHIC_14),
       GRect(cr.origin.x, cr.origin.y + cr.size.h - 18, cr.size.w, 16),
       GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 }
 
-// SELECT starts a battle from idle, or dismisses the result back to idle.
-// No-ops while BATTLE_FIGHTING is playing out - the timer drives that on
-// its own.
+// SELECT starts a battle from idle (only if there are Vital Points to
+// stake), or dismisses the result back to idle. No-ops while
+// BATTLE_FIGHTING is playing out - the timer drives that on its own.
 static void battle_select_click_handler(ClickRecognizerRef recognizer, void *context) {
   if (s_battle_state == BATTLE_IDLE) {
-    start_battle();
+    if (s_pet.vital_points > 0) {
+      start_battle();
+    }
+    // else: do nothing - the idle screen already explains why, no need
+    // for a separate popup/message
   } else if (s_battle_state == BATTLE_RESULT) {
     s_battle_state = BATTLE_IDLE;
     layer_mark_dirty(s_battle_canvas_layer);
@@ -1090,16 +1233,22 @@ static void stats_canvas_update_proc(Layer *layer, GContext *ctx) {
   graphics_draw_text(ctx, "Stats", fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
       GRect(cr.origin.x, cr.origin.y + 2, cr.size.w, 20), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 
-  static char age_buf[32];
-  int age_days = s_pet.age_hours / 24;
-  int age_hours_rem = s_pet.age_hours % 24;
-  snprintf(age_buf, sizeof(age_buf), "Age: %dd %dh", age_days, age_hours_rem);
-  graphics_draw_text(ctx, age_buf, fonts_get_system_font(FONT_KEY_GOTHIC_14),
-      GRect(cr.origin.x, cr.origin.y + 24, cr.size.w, 16), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
-
+  // Age swapped for Mistakes - Age is pure flavor with zero mechanical
+  // relevance, while Mistakes now genuinely gates evolution and had no
+  // visible home anywhere in the UI, which was a real gap.
   static char mistakes_buf[32];
   snprintf(mistakes_buf, sizeof(mistakes_buf), "Mistakes: %d/%d", s_pet.care_mistakes, CARE_MISTAKES_CAP);
   graphics_draw_text(ctx, mistakes_buf, fonts_get_system_font(FONT_KEY_GOTHIC_14),
+      GRect(cr.origin.x, cr.origin.y + 24, cr.size.w, 16), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+
+  static char time_buf[32];
+  int hours_needed_stat = hours_required_for_current_stage();
+  if (hours_needed_stat >= 0) {
+    snprintf(time_buf, sizeof(time_buf), "Time: %dh/%dh", s_pet.hours_in_stage, hours_needed_stat);
+  } else {
+    snprintf(time_buf, sizeof(time_buf), "Time: MAX");
+  }
+  graphics_draw_text(ctx, time_buf, fonts_get_system_font(FONT_KEY_GOTHIC_14),
       GRect(cr.origin.x, cr.origin.y + 40, cr.size.w, 16), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 
   static char effort_buf[32];
@@ -1150,19 +1299,39 @@ static void idle_bob_step(void *data) {
   s_idle_timer = app_timer_register(IDLE_BOB_MS, idle_bob_step, NULL);
 }
 
+// Starts or stops the idle bob timer to match the current battery saver
+// setting. Safe to call any time - at window load, or live while the app
+// is already open if the setting just changed via the phone config page.
+static void update_idle_timer(void) {
+  if (s_battery_saver) {
+    if (s_idle_timer) {
+      app_timer_cancel(s_idle_timer);
+      s_idle_timer = NULL;
+    }
+    s_idle_bob_up = false; // rest at the non-bobbed position
+  } else if (!s_idle_timer) {
+    s_idle_timer = app_timer_register(IDLE_BOB_MS, idle_bob_step, NULL);
+  }
+  if (s_canvas_layer) layer_mark_dirty(s_canvas_layer);
+}
+
 static void do_feed(void) {
   s_pet.hunger -= 35;
   if (s_pet.hunger < 0) s_pet.hunger = 0;
+  vibes_short_pulse();
   save_pet();
+  check_mistake_grace(); // may have just resolved a visible issue - cancel the grace timer if so
 }
 
 static void do_train(void) {
-  if (s_pet.energy < 25) return;
+  if (s_pet.energy < 25) return; // no vibration on a blocked attempt - nothing actually happened
   s_pet.strength += 20;
   if (s_pet.strength > MAX_STAT) s_pet.strength = MAX_STAT;
   s_pet.energy -= 25;
   s_pet.training_count++;
+  vibes_short_pulse();
   save_pet();
+  check_mistake_grace();
 }
 
 static void do_sleep(void) {
@@ -1170,13 +1339,17 @@ static void do_sleep(void) {
   if (s_pet.energy > MAX_STAT) s_pet.energy = MAX_STAT;
   s_pet.hunger += 15;
   if (s_pet.hunger > MAX_STAT) s_pet.hunger = MAX_STAT;
+  vibes_short_pulse();
   save_pet();
+  check_mistake_grace();
 }
 
 static void do_clean(void) {
   s_pet.has_mess = false;
   s_pet.hours_since_clean = 0;
+  vibes_short_pulse();
   save_pet();
+  check_mistake_grace();
 }
 
 // UP always opens the Battle screen directly - no longer part of the
@@ -1241,9 +1414,12 @@ static void window_load(Window *window) {
 
 #if defined(PBL_PLATFORM_EMERY)
   s_border_bitmap = gbitmap_create_with_resource(RESOURCE_ID_DIGIVICE_BORDER);
+#elif defined(PBL_PLATFORM_GABBRO)
+  s_border_bitmap = gbitmap_create_with_resource(RESOURCE_ID_DIGIVICE_ROUND_BORDER);
 #endif
 
-  s_idle_timer = app_timer_register(IDLE_BOB_MS, idle_bob_step, NULL);
+  update_idle_timer(); // starts it, unless battery saver is already on
+  check_mistake_grace(); // starts the grace period fresh if there's already a visible issue - a fair chance, not an instant penalty
 }
 
 static void window_unload(Window *window) {
@@ -1252,7 +1428,7 @@ static void window_unload(Window *window) {
     gbitmap_destroy(s_pet_bitmap);
     s_pet_bitmap = NULL;
   }
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_GABBRO)
   if (s_border_bitmap) {
     gbitmap_destroy(s_border_bitmap);
     s_border_bitmap = NULL;
@@ -1266,11 +1442,79 @@ static void window_unload(Window *window) {
     app_timer_cancel(s_evolve_timer);
     s_evolve_timer = NULL;
   }
+  if (s_mistake_grace_timer) {
+    // Closing the app never counts as a mistake by itself - only
+    // genuinely ignoring a visible issue while the app stays open does.
+    app_timer_cancel(s_mistake_grace_timer);
+    s_mistake_grace_timer = NULL;
+  }
+  s_mistake_grace_active = false;
+}
+
+// Full reset, triggered from the phone-side config page. Puts the pet
+// back to exactly the same fresh-egg state as a brand new install, and
+// makes sure whichever screen(s) are currently loaded redraw with it.
+static void reset_pet(void) {
+  if (s_evolve_timer) {
+    app_timer_cancel(s_evolve_timer);
+    s_evolve_timer = NULL;
+  }
+  s_evolving = false;
+
+  if (s_mistake_grace_timer) {
+    app_timer_cancel(s_mistake_grace_timer);
+    s_mistake_grace_timer = NULL;
+  }
+  s_mistake_grace_active = false;
+
+  s_pet.hunger = 20;
+  s_pet.energy = 90;
+  s_pet.strength = 0;
+  s_pet.age_hours = 0;
+  s_pet.hours_in_stage = 0;
+  s_pet.steps_in_stage = 0;
+  s_pet.training_count = 0;
+  s_pet.stage = STAGE_BOTAMON;
+  s_pet.alive = true;
+  s_pet.last_check = time(NULL);
+  s_pet.has_mess = false;
+  s_pet.hours_since_clean = 0;
+  s_pet.care_mistakes = 0;
+  s_pet.steps_baseline_today = 0;
+  s_pet.last_check_day_marker = 0;
+  s_pet.manually_asleep = false;
+  s_pet.vital_points = 0;
+  s_pet.win_count = 0;
+  s_pet.loss_count = 0;
+  s_pet.last_steps_shortfall = 0;
+  s_pet.last_effort_shortfall = 0;
+
+  save_pet();
+  load_pet_bitmap();
+
+  if (s_canvas_layer) layer_mark_dirty(s_canvas_layer);
+  if (s_battle_canvas_layer) layer_mark_dirty(s_battle_canvas_layer);
+  if (s_stats_canvas_layer) layer_mark_dirty(s_stats_canvas_layer);
+}
+
+static void inbox_received_handler(DictionaryIterator *iterator, void *context) {
+  Tuple *reset_tuple = dict_find(iterator, MESSAGE_KEY_ResetDigimon);
+  if (reset_tuple) {
+    reset_pet();
+  }
+
+  Tuple *battery_saver_tuple = dict_find(iterator, MESSAGE_KEY_BatterySaver);
+  if (battery_saver_tuple) {
+    s_battery_saver = battery_saver_tuple->value->int32 == 1;
+    persist_write_bool(KEY_BATTERY_SAVER, s_battery_saver);
+    update_idle_timer(); // takes effect immediately, not just on next launch
+  }
 }
 
 static void init(void) {
   load_pet();
   apply_time_decay();
+  s_battery_saver = persist_exists(KEY_BATTERY_SAVER) ? persist_read_bool(KEY_BATTERY_SAVER) : false;
 
   s_window = window_create();
   window_set_click_config_provider(s_window, click_config_provider);
@@ -1294,6 +1538,11 @@ static void init(void) {
     .load = stats_window_load,
     .unload = stats_window_unload,
   });
+
+  // Small explicit buffer sizes, not the platform maximum - the only
+  // thing this app currently sends over AppMessage is a single reset flag.
+  app_message_register_inbox_received(inbox_received_handler);
+  app_message_open(64, 64);
 }
 
 static void deinit(void) {
