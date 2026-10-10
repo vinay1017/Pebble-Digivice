@@ -174,7 +174,10 @@ static GBitmap *s_border_bitmap = NULL;
 static AppTimer *s_idle_timer = NULL;
 static bool s_idle_bob_up = false;
 static bool s_battery_saver = false; // when true, idle bob is fully disabled
+static int s_daily_steps_display = 0; // captured once at launch, same as every other stat - not persisted, always re-derived
 static bool s_evolving = false;
+#define HATCH_DURATION_MS 4000
+static const char *s_transition_text = "Evolving..."; // shared black-screen text (evolving / hatching)
 static AppTimer *s_evolve_timer = NULL;
 static AppTimer *s_mistake_grace_timer = NULL;
 static bool s_mistake_grace_active = false; // true once a grace period has started for the CURRENT unresolved issue
@@ -416,6 +419,7 @@ static void check_evolution(void) {
     s_pet.vital_points = 0; // fresh form, fresh start - rebuild via steps again
     load_pet_bitmap();
 
+    s_transition_text = "Evolving...";
     s_evolving = true;
     vibes_double_pulse(); // more distinct than the everyday action buzz - this moment should feel bigger
     if (s_evolve_timer) app_timer_cancel(s_evolve_timer);
@@ -449,6 +453,7 @@ static bool evolution_blocked_by_mistakes(void) {
 static int steps_since_last_check(time_t last_check, time_t now) {
 #if defined(PBL_HEALTH)
   int today_steps = (int)health_service_sum_today(HealthMetricStepCount);
+  s_daily_steps_display = today_steps; // captured here for the MetalGreymon display - no extra Health query needed
 
   struct tm *now_tm = localtime(&now);
   int now_day_marker = (now_tm->tm_year * 1000) + now_tm->tm_yday;
@@ -807,7 +812,7 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     graphics_context_set_fill_color(ctx, GColorBlack);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     graphics_context_set_text_color(ctx, GColorWhite);
-    graphics_draw_text(ctx, "Evolving...", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD),
+    graphics_draw_text(ctx, s_transition_text, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD),
         GRect(0, bounds.size.h / 2 - 14, bounds.size.w, 28),
         GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
     return;
@@ -858,6 +863,28 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
         ((bar_outline.size.w - 2) * pct) / 100, bar_outline.size.h - 2);
     graphics_context_set_fill_color(ctx, GColorBlack);
     graphics_fill_rect(ctx, bar_fill, 0, GCornerNone);
+  } else {
+    // Final stage (for now) - nothing left to evolve toward, so the same
+    // iconic bar+label slot becomes a plain daily step count instead of
+    // sitting empty. Different text format ("Today: N steps", no "/goal"
+    // ratio) deliberately distinguishes it from the evolution-progress
+    // version. The bar's fill is purely a visual reference against a
+    // common 10,000-step daily goal - it doesn't gate or unlock anything.
+    snprintf(progress_label, sizeof(progress_label), "Today: %d steps", s_daily_steps_display);
+    graphics_draw_text(ctx, progress_label, fonts_get_system_font(FONT_KEY_GOTHIC_14),
+        GRect(cr.origin.x, cr_bottom - 52, cr.size.w, 16), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+
+    int daily_pct = (s_daily_steps_display * 100) / 10000;
+    if (daily_pct > 100) daily_pct = 100;
+    if (daily_pct < 0) daily_pct = 0;
+
+    GRect bar_outline = GRect(cr.origin.x + 10, cr_bottom - 38, cr.size.w - 20, 8);
+    graphics_context_set_stroke_color(ctx, GColorBlack);
+    graphics_draw_rect(ctx, bar_outline);
+    GRect bar_fill = GRect(bar_outline.origin.x + 1, bar_outline.origin.y + 1,
+        ((bar_outline.size.w - 2) * daily_pct) / 100, bar_outline.size.h - 2);
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_rect(ctx, bar_fill, 0, GCornerNone);
   }
 
   static char stats_buf[64];
@@ -870,6 +897,9 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     static char action_buf[32];
     snprintf(action_buf, sizeof(action_buf), "> %s <", action_name(s_selected_action));
     graphics_draw_text(ctx, action_buf, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+        GRect(cr.origin.x, cr_bottom - 12, cr.size.w, 16), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+  } else {
+    graphics_draw_text(ctx, "Hold DOWN: new egg", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
         GRect(cr.origin.x, cr_bottom - 12, cr.size.w, 16), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
   }
 }
@@ -1356,25 +1386,62 @@ static void do_clean(void) {
 // Feed/Train/Sleep/Clean cycle at all, sidestepping any ambiguity with
 // SELECT's long-press (manual sleep) entirely.
 static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
-  if (!s_pet.alive) return;
+  if (s_evolving || !s_pet.alive) return;
   window_stack_push(s_battle_window, true);
 }
 
 // DOWN alone now cycles through the remaining 4 menu items on a short
 // press. A long press opens the Stats screen instead.
 static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
-  if (!s_pet.alive) return;
+  if (s_evolving || !s_pet.alive) return;
   s_selected_action = (s_selected_action + 1) % ACTION_COUNT;
   refresh();
 }
 
+static void start_hatch(void); // defined after reset_pet()
+
+// Long DOWN: Stats screen while alive; on the R.I.P. screen it hatches a
+// fresh egg instead (the long hold doubles as the "are you sure").
 static void down_long_click_handler(ClickRecognizerRef recognizer, void *context) {
-  if (!s_pet.alive) return;
+  if (s_evolving) return;
+  if (!s_pet.alive) {
+    start_hatch();
+    return;
+  }
   window_stack_push(s_stats_window, true);
 }
 
+#if defined(PBL_TOUCH)
+// Tapping the pet sprite itself opens Stats - a second, alternate way in
+// alongside the DOWN long-press (which stays as-is for now; may get
+// repurposed later once touch is confirmed working well). Only acts on
+// TouchEvent_Liftoff (the completed tap), checked against exactly the
+// same bounding box draw_pet() actually renders into - including the
+// idle bob offset, so "touching the Digimon" means touching where it
+// visually is, not some fixed screen region.
+static void touch_handler(const TouchEvent *event, void *context) {
+  if (event->type != TouchEvent_Liftoff) return;
+  if (s_evolving || !s_pet.alive || !s_pet_bitmap) return;
+
+  GRect bounds = layer_get_bounds(window_get_root_layer(s_window));
+  GPoint center = pet_center_point(bounds);
+  GRect bmp_bounds = gbitmap_get_bounds(s_pet_bitmap);
+  GRect pet_rect = GRect(
+      center.x - bmp_bounds.size.w / 2,
+      center.y - bmp_bounds.size.h / 2,
+      bmp_bounds.size.w,
+      bmp_bounds.size.h);
+
+  bool inside = (event->x >= pet_rect.origin.x && event->x < pet_rect.origin.x + pet_rect.size.w &&
+                 event->y >= pet_rect.origin.y && event->y < pet_rect.origin.y + pet_rect.size.h);
+  if (inside) {
+    window_stack_push(s_stats_window, true);
+  }
+}
+#endif
+
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
-  if (!s_pet.alive) return;
+  if (s_evolving || !s_pet.alive) return;
   switch (s_selected_action) {
     case ACTION_FEED: do_feed(); break;
     case ACTION_TRAIN: do_train(); break;
@@ -1388,7 +1455,7 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
 // Long-press on SELECT toggles BE-style manual sleep on/off - our
 // adaptation of "hold two buttons together" for a 3-button watch.
 static void select_long_click_handler(ClickRecognizerRef recognizer, void *context) {
-  if (!s_pet.alive) return;
+  if (s_evolving || !s_pet.alive) return;
   s_pet.manually_asleep = !s_pet.manually_asleep;
   save_pet();
   refresh();
@@ -1420,6 +1487,10 @@ static void window_load(Window *window) {
 
   update_idle_timer(); // starts it, unless battery saver is already on
   check_mistake_grace(); // starts the grace period fresh if there's already a visible issue - a fair chance, not an instant penalty
+
+#if defined(PBL_TOUCH)
+  touch_service_subscribe(touch_handler, NULL);
+#endif
 }
 
 static void window_unload(Window *window) {
@@ -1449,6 +1520,10 @@ static void window_unload(Window *window) {
     s_mistake_grace_timer = NULL;
   }
   s_mistake_grace_active = false;
+
+#if defined(PBL_TOUCH)
+  touch_service_unsubscribe();
+#endif
 }
 
 // Full reset, triggered from the phone-side config page. Puts the pet
@@ -1497,10 +1572,21 @@ static void reset_pet(void) {
   if (s_stats_canvas_layer) layer_mark_dirty(s_stats_canvas_layer);
 }
 
+// Reset plus a short black "Hatching..." screen, reusing the evolution
+// screen and its timer. Used by both the on-watch hold and the phone reset.
+static void start_hatch(void) {
+  reset_pet(); // also clears any evolve timer
+  s_transition_text = "Hatching...";
+  s_evolving = true;
+  vibes_double_pulse();
+  s_evolve_timer = app_timer_register(HATCH_DURATION_MS, evolve_timer_callback, NULL);
+  if (s_canvas_layer) layer_mark_dirty(s_canvas_layer);
+}
+
 static void inbox_received_handler(DictionaryIterator *iterator, void *context) {
   Tuple *reset_tuple = dict_find(iterator, MESSAGE_KEY_ResetDigimon);
   if (reset_tuple) {
-    reset_pet();
+    start_hatch();
   }
 
   Tuple *battery_saver_tuple = dict_find(iterator, MESSAGE_KEY_BatterySaver);
