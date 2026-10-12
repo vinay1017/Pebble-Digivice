@@ -14,7 +14,9 @@
         "enableMultiJS": true,
         "messageKeys": [
             "ResetDigimon",
-            "BatterySaver"
+            "BatterySaver",
+            "SaveData",
+            "ImportData"
         ],
         "projectType": "native",
         "resources": {
@@ -50,9 +52,147 @@
                     "type": "bitmap"
                 },
                 {
+                    "file": "images/shinmonzae_d.png",
+                    "name": "shinmonzae_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/tyrano_d.png",
+                    "name": "tyrano_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/monzae_d.png",
+                    "name": "monzae_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/agu_d.png",
+                    "name": "agu_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/nume_d.png",
+                    "name": "nume_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/airdra_d.png",
+                    "name": "airdra_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/bota_d.png",
+                    "name": "bota_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/seadra_d.png",
+                    "name": "seadra_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/banchomame_d.png",
+                    "name": "banchomame_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/beta_d.png",
+                    "name": "beta_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/blitzgrey_d.png",
+                    "name": "blitzgrey_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/devi_d.png",
+                    "name": "devi_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/koro_d.png",
+                    "name": "koro_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/grey_d.png",
+                    "name": "grey_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/mame_d.png",
+                    "name": "mame_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/mera_d.png",
+                    "name": "mera_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/metalgrey_vi_d.png",
+                    "name": "metalgrey_vi_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
                     "file": "images/IconAgu",
                     "menuIcon": true,
                     "name": "ICON_AGU",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/bibi_d.png",
+                    "name": "bibi_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/bout_d.png",
+                    "name": "bout_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/bulk_d.png",
+                    "name": "bulk_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/doki_d.png",
+                    "name": "doki_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/kazuchi_d.png",
+                    "name": "kazuchi_d",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/pulse_d.png",
+                    "name": "pulse_d",
                     "targetPlatforms": null,
                     "type": "bitmap"
                 },
@@ -82,5 +222,5 @@
             "watchface": false
         }
     },
-    "version": "0.4.0"
+    "version": "0.91.0"
 }
